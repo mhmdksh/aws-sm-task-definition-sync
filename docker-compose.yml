@@ -1,0 +1,6 @@
+services:
+  secret-syncer:
+    container_name: secret-syncer
+    build: .
+    env_file:
+      - .env

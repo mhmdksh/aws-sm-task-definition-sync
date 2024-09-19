@@ -1,0 +1,18 @@
+{
+    "name": "vault-secret-injector",
+    "version": "1.0.0",
+    "description": "A Node.js application to connect to Hashicorp Vault and handle secrets.",
+    "main": "index.js",
+    "scripts": {
+        "start": "node app.js"
+    },
+    "dependencies": {
+        "@aws-sdk/client-ecs": "^3.654.0",
+        "@aws-sdk/client-secrets-manager": "^3.654.0",
+        "aws-sdk": "^2.1691.0",
+        "aws-sdk-js-codemod": "^2.3.2",
+        "dockerode": "^4.0.2",
+        "dotenv": "^16.0.0",
+        "node-vault": "^0.10.0"
+    }
+}
