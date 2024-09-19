@@ -1,4 +1,4 @@
-# vault-secret-injector
+# AWS Secret Manager <--> ECS Task Definition Sync
 
 ## Setup
 ```bash
