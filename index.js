@@ -27,9 +27,13 @@ async function fetchSecret(secretName) {
 // Function to get the current secrets from the ECS task definition
 function getCurrentSecretKeys(taskDefinition) {
   const containerDefinitions = taskDefinition.containerDefinitions || [];
-  const currentSecrets = containerDefinitions.flatMap(container => container.secrets || []);
+  const currentSecrets = containerDefinitions.flatMap(container => {
+    const containerSecrets = container.secrets || [];
+    const logSecrets = container.logConfiguration?.secretOptions || [];
+    return [...containerSecrets, ...logSecrets];
+  });
   const currentSecretKeys = currentSecrets.map(secret => secret.name);
-  return new Set(currentSecretKeys); // Use a Set for easier comparison
+  return new Set(currentSecretKeys);
 }
 
 // Function to compare new secrets with existing ones
@@ -60,13 +64,34 @@ async function updateEcsTaskDefinitionWithSecrets(secretName, taskDefinitionName
     if (haveSecretsChanged(currentSecretKeys, secretData)) {
       console.log('Secret names have changed, updating ECS task definition...');
 
-      // Modify only the secrets section
       const updatedContainerDefinitions = currentTaskDefinition.taskDefinition.containerDefinitions.map(container => {
-        const updatedSecrets = Object.entries(secretData).map(([key]) => ({
-          name: key,
-          valueFrom: `${secretArn}:${key}::`
-        }));
-        return { ...container, secrets: updatedSecrets };
+        // Create a copy of the container to modify
+        const updatedContainer = { ...container };
+        
+        // Handle regular secrets (excluding log secrets)
+        if (container.secrets) {
+          const regularSecrets = Object.entries(secretData)
+            .filter(([key]) => !container.logConfiguration?.secretOptions?.some(s => s.name === key))
+            .map(([key]) => ({
+              name: key,
+              valueFrom: `${secretArn}:${key}::`
+            }));
+          updatedContainer.secrets = regularSecrets;
+        }
+
+        // Handle log configuration secrets separately
+        if (container.logConfiguration?.secretOptions) {
+          const logSecrets = container.logConfiguration.secretOptions.map(secret => ({
+            name: secret.name,
+            valueFrom: `${secretArn}:${secret.name}::`
+          }));
+          updatedContainer.logConfiguration = {
+            ...container.logConfiguration,
+            secretOptions: logSecrets
+          };
+        }
+
+        return updatedContainer;
       });
 
       // Register new task definition with updated secrets
