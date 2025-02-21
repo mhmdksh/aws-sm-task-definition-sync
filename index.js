@@ -127,34 +127,48 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       taskDefinition: taskDefinitionName 
     }));
 
-    // Get all secrets from all containers (including log configuration secrets)
-    const currentSecrets = taskDefinition.containerDefinitions.flatMap(container => {
-      const containerSecrets = container.secrets || [];
-      const logSecrets = container.logConfiguration?.secretOptions || [];
-      return [...containerSecrets, ...logSecrets];
+    // Create a map of container name to its secret paths
+    const containerSecretMap = new Map();
+    secretPaths.forEach(({ path, container }) => {
+      if (!containerSecretMap.has(container)) {
+        containerSecretMap.set(container, new Set());
+      }
+      // Add secrets for this path to the container's set
+      Object.keys(secretData).forEach(key => {
+        containerSecretMap.get(container).add(key);
+      });
     });
 
-    // Create sets for comparison
-    const currentSecretNames = new Set(currentSecrets.map(secret => secret.name));
-    const newSecretNames = new Set(Object.keys(secretData));
+    // Check if there are structural changes for any container
+    let hasStructuralChanges = false;
+    taskDefinition.containerDefinitions.forEach(container => {
+      const containerName = container.name;
+      const currentSecrets = new Set((container.secrets || []).map(s => s.name));
+      const newSecrets = containerSecretMap.get(containerName) || new Set();
 
-    // Compare sets for structural changes
-    if (currentSecretNames.size === newSecretNames.size && 
-        [...currentSecretNames].every(name => newSecretNames.has(name))) {
-      console.log('No changes in secret structure, skipping task definition update');
+      if (currentSecrets.size !== newSecrets.size || 
+          ![...currentSecrets].every(secret => newSecrets.has(secret))) {
+        hasStructuralChanges = true;
+        console.log(`Structural changes detected for container ${containerName}`);
+        console.log('Current secrets:', [...currentSecrets]);
+        console.log('New secrets:', [...newSecrets]);
+      }
+    });
+
+    if (!hasStructuralChanges) {
+      console.log('No changes in secret structure for any container, skipping task definition update');
       return;
     }
 
-    console.log('Current secrets:', [...currentSecretNames]);
-    console.log('New secrets:', [...newSecretNames]);
-
-    // Update task definition only if there are structural changes
+    // Update task definition with container-specific secrets
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
       const updatedContainer = { ...container };
+      const containerName = container.name;
+      const containerSecrets = containerSecretMap.get(containerName);
 
-      // Update regular secrets if container has them
-      if (container.secrets) {
-        const regularSecrets = Object.keys(secretData)
+      if (containerSecrets && container.secrets) {
+        // Only update secrets that belong to this container
+        const regularSecrets = [...containerSecrets]
           .filter(key => {
             // Only include secrets that aren't log secrets
             const isLogSecret = container.logConfiguration?.secretOptions?.some(
@@ -192,7 +206,7 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       volumes: taskDefinition.volumes || []
     }));
     
-    console.log('Task definition updated with secret structure changes');
+    console.log('Task definition updated with container-specific secret changes');
   } catch (err) {
     throw new Error(`Failed to update ECS task definition: ${err.message}`);
   }
