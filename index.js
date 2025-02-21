@@ -127,65 +127,71 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       taskDefinition: taskDefinitionName 
     }));
 
-    // Get the first container's secrets as they should all be the same
-    const container = taskDefinition.containerDefinitions[0];
-    if (!container || !container.secrets) {
-      console.log('No secrets found in current task definition');
+    // Get all secrets from all containers (including log configuration secrets)
+    const currentSecrets = taskDefinition.containerDefinitions.flatMap(container => {
+      const containerSecrets = container.secrets || [];
+      const logSecrets = container.logConfiguration?.secretOptions || [];
+      return [...containerSecrets, ...logSecrets];
+    });
+
+    // Create sets for comparison
+    const currentSecretNames = new Set(currentSecrets.map(secret => secret.name));
+    const newSecretNames = new Set(Object.keys(secretData));
+
+    // Compare sets for structural changes
+    if (currentSecretNames.size === newSecretNames.size && 
+        [...currentSecretNames].every(name => newSecretNames.has(name))) {
+      console.log('No changes in secret structure, skipping task definition update');
       return;
     }
 
-    // Store current secrets in a Map for easy comparison
-    const currentSecrets = new Map(
-      container.secrets.map(s => [s.name, s.valueFrom])
-    );
-    const newSecrets = new Set(Object.keys(secretData));
-
-    // Compare the secret names only
-    const currentSecretNames = new Set(currentSecrets.keys());
-    
-    // Check for actual structural changes
-    const addedSecrets = [...newSecrets].filter(s => !currentSecretNames.has(s));
-    const removedSecrets = [...currentSecretNames].filter(s => !newSecrets.has(s));
-
-    // Log current state for debugging
-    console.log('Current secrets in task definition:', [...currentSecretNames]);
-    console.log('New secrets from Vault:', [...newSecrets]);
-
-    if (addedSecrets.length === 0 && removedSecrets.length === 0) {
-      console.log('No structural changes in secrets, skipping task definition update');
-      return;
-    }
-
-    console.log('Changes detected:');
-    if (addedSecrets.length > 0) console.log('New secrets added:', addedSecrets);
-    if (removedSecrets.length > 0) console.log('Secrets removed:', removedSecrets);
+    console.log('Current secrets:', [...currentSecretNames]);
+    console.log('New secrets:', [...newSecretNames]);
 
     // Update task definition only if there are structural changes
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
-      const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
-        (!container.name && secretPaths[0]);
+      const updatedContainer = { ...container };
 
-      if (containerConfig) {
-        // Create the new secrets array maintaining the existing valueFrom for unchanged secrets
-        const containerSecrets = [...newSecrets].map(key => ({
-          name: key,
-          valueFrom: currentSecrets.get(key) || `${secretArn}:${key}::`
-        }));
+      // Update regular secrets if container has them
+      if (container.secrets) {
+        const regularSecrets = Object.keys(secretData)
+          .filter(key => {
+            // Only include secrets that aren't log secrets
+            const isLogSecret = container.logConfiguration?.secretOptions?.some(
+              logSecret => logSecret.name === key
+            );
+            return !isLogSecret;
+          })
+          .map(key => ({
+            name: key,
+            valueFrom: `${secretArn}:${key}::`
+          }));
+        updatedContainer.secrets = regularSecrets;
+      }
 
-        return {
-          ...container,
-          secrets: containerSecrets
+      // Preserve log configuration secrets
+      if (container.logConfiguration?.secretOptions) {
+        updatedContainer.logConfiguration = {
+          ...container.logConfiguration,
+          secretOptions: container.logConfiguration.secretOptions
         };
       }
-      return container;
+
+      return updatedContainer;
     });
 
-    // Only update if we actually found changes
     await ecs.send(new RegisterTaskDefinitionCommand({
       family: taskDefinition.family,
       containerDefinitions: updatedContainerDefinitions,
-      ...taskDefinition
+      executionRoleArn: taskDefinition.executionRoleArn,
+      taskRoleArn: taskDefinition.taskRoleArn,
+      networkMode: taskDefinition.networkMode,
+      cpu: taskDefinition.cpu,
+      memory: taskDefinition.memory,
+      requiresCompatibilities: taskDefinition.requiresCompatibilities,
+      volumes: taskDefinition.volumes || []
     }));
+    
     console.log('Task definition updated with secret structure changes');
   } catch (err) {
     throw new Error(`Failed to update ECS task definition: ${err.message}`);
