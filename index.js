@@ -127,29 +127,30 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       taskDefinition: taskDefinitionName 
     }));
 
-    // Create a map of container name to its secret paths
+    // Create a map of which secrets belong to which container based on vault paths
     const containerSecretMap = new Map();
-    secretPaths.forEach(({ path, container }) => {
-      if (!containerSecretMap.has(container)) {
-        containerSecretMap.set(container, new Set());
-      }
-      // Add secrets for this path to the container's set
-      Object.keys(secretData).forEach(key => {
-        containerSecretMap.get(container).add(key);
-      });
-    });
+    for (const { path, container } of secretPaths) {
+      // Skip if no container specified
+      if (!container) continue;
 
-    // Check if there are structural changes for any container
+      // Get the secrets for this specific vault path
+      const vaultPathSecrets = await vaultClient.read(`${process.env.VAULT_KV_STORE}/data/${path}`);
+      
+      // Store the secrets for this container
+      containerSecretMap.set(container, Object.keys(vaultPathSecrets.data.data));
+    }
+
+    // Check for structural changes in each container's secrets
     let hasStructuralChanges = false;
     taskDefinition.containerDefinitions.forEach(container => {
       const containerName = container.name;
       const currentSecrets = new Set((container.secrets || []).map(s => s.name));
-      const newSecrets = containerSecretMap.get(containerName) || new Set();
+      const newSecrets = new Set(containerSecretMap.get(containerName) || []);
 
       if (currentSecrets.size !== newSecrets.size || 
           ![...currentSecrets].every(secret => newSecrets.has(secret))) {
         hasStructuralChanges = true;
-        console.log(`Structural changes detected for container ${containerName}`);
+        console.log(`Structural changes detected for container ${containerName}:`);
         console.log('Current secrets:', [...currentSecrets]);
         console.log('New secrets:', [...newSecrets]);
       }
@@ -164,23 +165,16 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
       const updatedContainer = { ...container };
       const containerName = container.name;
-      const containerSecrets = containerSecretMap.get(containerName);
-
-      if (containerSecrets && container.secrets) {
-        // Only update secrets that belong to this container
-        const regularSecrets = [...containerSecrets]
-          .filter(key => {
-            // Only include secrets that aren't log secrets
-            const isLogSecret = container.logConfiguration?.secretOptions?.some(
-              logSecret => logSecret.name === key
-            );
-            return !isLogSecret;
-          })
-          .map(key => ({
-            name: key,
-            valueFrom: `${secretArn}:${key}::`
-          }));
-        updatedContainer.secrets = regularSecrets;
+      
+      // Only update containers that have specified secrets
+      if (containerSecretMap.has(containerName)) {
+        const containerSecretNames = containerSecretMap.get(containerName);
+        
+        // Update container secrets
+        updatedContainer.secrets = containerSecretNames.map(secretName => ({
+          name: secretName,
+          valueFrom: `${secretArn}:${secretName}::`
+        }));
       }
 
       // Preserve log configuration secrets
