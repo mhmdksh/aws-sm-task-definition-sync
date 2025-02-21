@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
 const { DescribeSecretCommand, PutSecretValueCommand, CreateSecretCommand } = require('@aws-sdk/client-secrets-manager');
+const { DescribeTaskDefinitionCommand, RegisterTaskDefinitionCommand } = require('@aws-sdk/client-ecs');
 
 // Initialize clients
 const vaultClient = vault({
@@ -111,16 +112,22 @@ async function pushSecretsToAWS(secretData) {
   }
 }
 
+// Add this function near the top
+function handleSyncFailure() {
+  console.log('Handling sync failure...');
+  // Add any failure handling logic here, like retries or notifications
+}
+
 // Modified updateEcsTaskDefinition to handle container-specific updates without prefixing
 async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
   const taskDefinitionName = process.env.ECS_TASK_DEFINITION;
 
   try {
-    const currentTaskDefinition = await ecs.describeTaskDefinition({ 
+    const { taskDefinition } = await ecs.send(new DescribeTaskDefinitionCommand({ 
       taskDefinition: taskDefinitionName 
-    });
+    }));
 
-    const updatedContainerDefinitions = currentTaskDefinition.taskDefinition.containerDefinitions.map(container => {
+    const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
       // Find if this container has specific secrets to update
       const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
         (!container.name && secretPaths[0]); // Fallback to first container if no name specified
@@ -140,11 +147,11 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       return container;
     });
 
-    await ecs.registerTaskDefinition({
-      family: currentTaskDefinition.taskDefinition.family,
+    await ecs.send(new RegisterTaskDefinitionCommand({
+      family: taskDefinition.family,
       containerDefinitions: updatedContainerDefinitions,
-      ...currentTaskDefinition.taskDefinition
-    });
+      ...taskDefinition
+    }));
     console.log('Task definition updated successfully');
   } catch (err) {
     throw new Error(`Failed to update ECS task definition: ${err.message}`);
