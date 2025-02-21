@@ -135,20 +135,20 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
     // Get new secrets from secretData
     const newSecrets = Object.keys(secretData);
 
-    // Check if there are any differences
-    const secretsChanged = 
+    // Check if the structure of secrets has changed (added/removed secrets)
+    const secretsStructureChanged = 
       newSecrets.length !== currentSecrets.length ||
       newSecrets.some(secret => !currentSecrets.includes(secret));
 
-    if (!secretsChanged) {
-      console.log('No changes in secrets, skipping task definition update');
+    if (!secretsStructureChanged) {
+      console.log('No structural changes in secrets, skipping task definition update');
       return;
     }
 
+    // Only update task definition if secret structure has changed
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
-      // Find if this container has specific secrets to update
       const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
-        (!container.name && secretPaths[0]); // Fallback to first container if no name specified
+        (!container.name && secretPaths[0]);
 
       if (containerConfig) {
         const containerSecrets = Object.keys(secretData)
@@ -170,7 +170,7 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       containerDefinitions: updatedContainerDefinitions,
       ...taskDefinition
     }));
-    console.log('Task definition updated successfully');
+    console.log('Secret structure changed, task definition updated successfully');
   } catch (err) {
     throw new Error(`Failed to update ECS task definition: ${err.message}`);
   }
