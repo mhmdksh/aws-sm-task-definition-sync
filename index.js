@@ -127,23 +127,29 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       taskDefinition: taskDefinitionName 
     }));
 
-    // Get current secrets from task definition
-    const currentSecrets = taskDefinition.containerDefinitions.flatMap(container => 
-      container.secrets?.map(secret => secret.name) || []
+    // Get current secrets from task definition, sorted for consistent comparison
+    const currentSecrets = new Set(
+      taskDefinition.containerDefinitions.flatMap(container => 
+        container.secrets?.map(secret => secret.name) || []
+      ).sort()
     );
 
-    // Get new secrets from secretData
-    const newSecrets = Object.keys(secretData);
+    // Get new secrets from secretData, sorted for consistent comparison
+    const newSecrets = new Set(Object.keys(secretData).sort());
 
-    // Check if the structure of secrets has changed (added/removed secrets)
+    // Compare sets for exact equality (both content and size)
     const secretsStructureChanged = 
-      newSecrets.length !== currentSecrets.length ||
-      newSecrets.some(secret => !currentSecrets.includes(secret));
+      currentSecrets.size !== newSecrets.size || 
+      ![...currentSecrets].every(secret => newSecrets.has(secret));
 
     if (!secretsStructureChanged) {
       console.log('No structural changes in secrets, skipping task definition update');
       return;
     }
+
+    console.log('Detected changes in secret structure:');
+    console.log('Current secrets:', [...currentSecrets]);
+    console.log('New secrets:', [...newSecrets]);
 
     // Only update task definition if secret structure has changed
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
@@ -151,15 +157,14 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
         (!container.name && secretPaths[0]);
 
       if (containerConfig) {
-        const containerSecrets = Object.keys(secretData)
-          .map(key => ({
-            name: key,
-            valueFrom: `${secretArn}:${key}::`
-          }));
+        const containerSecrets = [...newSecrets].map(key => ({
+          name: key,
+          valueFrom: `${secretArn}:${key}::`
+        }));
 
         return {
           ...container,
-          secrets: containerSecrets.length ? containerSecrets : container.secrets
+          secrets: containerSecrets
         };
       }
       return container;
