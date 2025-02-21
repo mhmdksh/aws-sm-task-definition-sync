@@ -1,134 +1,157 @@
-const { ECS } = require('@aws-sdk/client-ecs');
-const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
+const vault = require('node-vault');
+const { ECS, SecretsManager } = require('@aws-sdk/client-ecs');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
-// Initialize AWS SDK for ECS and Secrets Manager
-const ecs = new ECS({ region: process.env.AWS_REGION });
+// Initialize clients
+const vaultClient = vault({
+  apiVersion: 'v1',
+  endpoint: process.env.VAULT_ENDPOINT,
+  token: process.env.VAULT_TOKEN,
+});
+
 const secretsManager = new SecretsManager({ region: process.env.AWS_REGION });
+const ecs = new ECS({ region: process.env.AWS_REGION });
 
-// Function to fetch secret ARN and values from AWS Secrets Manager
-async function fetchSecret(secretName) {
+// File path to store the last known secret values
+const cacheFilePath = path.resolve(__dirname, '.last.cache.json');
+
+// Main function to handle the complete sync process
+async function syncSecrets() {
   try {
-    const secretDetails = await secretsManager.describeSecret({ SecretId: secretName });
-    const secretArn = secretDetails.ARN;
-
-    const secretValue = await secretsManager.getSecretValue({ SecretId: secretName });
+    // Step 1: Read secrets from Vault
+    const { secrets, secretPaths } = await readVaultSecrets();
     
-    if (secretValue.SecretString) {
-      return { secretData: JSON.parse(secretValue.SecretString), secretArn };
-    }
-    return {};
+    // Step 2: Push secrets to AWS Secrets Manager
+    const secretArn = await pushSecretsToAWS(secrets);
+    
+    // Step 3: Update ECS Task Definition
+    await updateEcsTaskDefinition(secretArn, secrets, secretPaths);
+    
+    console.log('Sync completed successfully');
   } catch (err) {
-    console.error(`Error fetching secret: ${err.message}`);
+    console.error('Sync failed:', err.message);
+    handleSyncFailure();
+  }
+}
+
+// Helper function to get all secret paths from environment
+function getSecretPaths() {
+  const paths = [];
+  let i = 1;
+  while (process.env[`VAULT_SECRET_PATH_${i}`]) {
+    paths.push({
+      path: process.env[`VAULT_SECRET_PATH_${i}`],
+      container: process.env[`CONTAINER_NAME_${i}`] || null
+    });
+    i++;
+  }
+  return paths.length ? paths : [{ path: process.env.VAULT_SECRET_PATH, container: process.env.CONTAINER_NAME || null }];
+}
+
+// Modified readVaultSecrets to handle multiple secret paths without prefixing
+async function readVaultSecrets() {
+  const kvStore = process.env.VAULT_KV_STORE;
+  const secretPaths = getSecretPaths();
+  const allSecrets = {};
+
+  try {
+    for (const { path } of secretPaths) {
+      const secret = await vaultClient.read(`${kvStore}/data/${path}`);
+      // Merge secrets directly without prefixing
+      Object.assign(allSecrets, secret.data.data);
+    }
+    
+    fs.writeFileSync(cacheFilePath, JSON.stringify(allSecrets, null, 2));
+    return { secrets: allSecrets, secretPaths };
+  } catch (err) {
+    if (err.message.includes('permission denied') || err.message.includes('invalid token')) {
+      console.error('Vault authentication failed, using cached secrets');
+      if (fs.existsSync(cacheFilePath)) {
+        return { secrets: JSON.parse(fs.readFileSync(cacheFilePath, 'utf-8')), secretPaths };
+      }
+      throw new Error('No cached secrets available');
+    }
     throw err;
   }
 }
 
-// Function to get the current secrets from the ECS task definition
-function getCurrentSecretKeys(taskDefinition) {
-  const containerDefinitions = taskDefinition.containerDefinitions || [];
-  const currentSecrets = containerDefinitions.flatMap(container => {
-    const containerSecrets = container.secrets || [];
-    const logSecrets = container.logConfiguration?.secretOptions || [];
-    return [...containerSecrets, ...logSecrets];
-  });
-  const currentSecretKeys = currentSecrets.map(secret => secret.name);
-  return new Set(currentSecretKeys);
-}
+// Function to push secrets to AWS Secrets Manager
+async function pushSecretsToAWS(secretData) {
+  const secretName = process.env.AWS_SECRET_NAME;
+  const secretString = JSON.stringify(secretData);
 
-// Function to compare new secrets with existing ones
-function haveSecretsChanged(currentSecretKeys, newSecretKeys) {
-  const newKeysSet = new Set(Object.keys(newSecretKeys));
-  
-  if (currentSecretKeys.size !== newKeysSet.size) return true; // Different number of secrets
-  
-  for (let key of newKeysSet) {
-    if (!currentSecretKeys.has(key)) {
-      return true; // Found a secret that's new
-    }
-  }
-  return false; // No changes in the secret keys
-}
-
-// Function to update ECS task definition with dynamic secrets
-async function updateEcsTaskDefinitionWithSecrets(secretName, taskDefinitionName) {
   try {
-    // Fetch secret data and ARN from Secrets Manager
-    const { secretData, secretArn } = await fetchSecret(secretName);
-
-    // Fetch the current ECS task definition
-    const currentTaskDefinition = await ecs.describeTaskDefinition({ taskDefinition: taskDefinitionName });
-    const currentSecretKeys = getCurrentSecretKeys(currentTaskDefinition.taskDefinition);
-
-    // Only update if the secret keys have changed
-    if (haveSecretsChanged(currentSecretKeys, secretData)) {
-      console.log('Secret names have changed, updating ECS task definition...');
-
-      const updatedContainerDefinitions = currentTaskDefinition.taskDefinition.containerDefinitions.map(container => {
-        // Create a copy of the container to modify
-        const updatedContainer = { ...container };
-        
-        // Handle regular secrets (excluding log secrets)
-        if (container.secrets) {
-          const regularSecrets = Object.entries(secretData)
-            .filter(([key]) => !container.logConfiguration?.secretOptions?.some(s => s.name === key))
-            .map(([key]) => ({
-              name: key,
-              valueFrom: `${secretArn}:${key}::`
-            }));
-          updatedContainer.secrets = regularSecrets;
-        }
-
-        // Handle log configuration secrets separately
-        if (container.logConfiguration?.secretOptions) {
-          const logSecrets = container.logConfiguration.secretOptions.map(secret => ({
-            name: secret.name,
-            valueFrom: `${secretArn}:${secret.name}::`
-          }));
-          updatedContainer.logConfiguration = {
-            ...container.logConfiguration,
-            secretOptions: logSecrets
-          };
-        }
-
-        return updatedContainer;
+    // Check if secret exists
+    let secretExists = true;
+    try {
+      const secretDetails = await secretsManager.describeSecret({ SecretId: secretName });
+      await secretsManager.putSecretValue({
+        SecretId: secretName,
+        SecretString: secretString
       });
-
-      // Register new task definition with updated secrets
-      const newTaskDefinition = {
-        family: currentTaskDefinition.taskDefinition.family,
-        containerDefinitions: updatedContainerDefinitions,
-        executionRoleArn: currentTaskDefinition.taskDefinition.executionRoleArn,
-        taskRoleArn: currentTaskDefinition.taskDefinition.taskRoleArn,
-        networkMode: currentTaskDefinition.taskDefinition.networkMode,
-        cpu: currentTaskDefinition.taskDefinition.cpu,
-        memory: currentTaskDefinition.taskDefinition.memory,
-        requiresCompatibilities: currentTaskDefinition.taskDefinition.requiresCompatibilities,
-        volumes: currentTaskDefinition.taskDefinition.volumes,
-      };
-
-      const response = await ecs.registerTaskDefinition(newTaskDefinition);
-      console.log(`Task definition updated successfully: ${response.taskDefinition.taskDefinitionArn}`);
-    } else {
-      console.log('No changes in secret names, skipping task definition update.');
+      console.log(`Updated secret ${secretName}`);
+      return secretDetails.ARN;
+    } catch (err) {
+      if (err.name === 'ResourceNotFoundException') {
+        const response = await secretsManager.createSecret({
+          Name: secretName,
+          SecretString: secretString
+        });
+        console.log(`Created new secret ${secretName}`);
+        return response.ARN;
+      }
+      throw err;
     }
-
   } catch (err) {
-    console.error(`Error updating ECS task definition: ${err.message}`);
+    throw new Error(`Failed to update AWS Secrets Manager: ${err.message}`);
   }
 }
 
-// Function to check for secret updates periodically
-function startPeriodicCheck(intervalInSeconds) {
-  setInterval(async () => {
-    const secretName = process.env.AWS_SECRET_NAME; // The secret name is passed via environment variable
-    const taskDefinitionName = process.env.ECS_TASK_DEFINITION; // Task definition name is passed via environment variable
+// Modified updateEcsTaskDefinition to handle container-specific updates without prefixing
+async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
+  const taskDefinitionName = process.env.ECS_TASK_DEFINITION;
 
-    console.log(`Checking for updates to secret: ${secretName}`);
-    await updateEcsTaskDefinitionWithSecrets(secretName, taskDefinitionName);
-  }, intervalInSeconds * 1000);
+  try {
+    const currentTaskDefinition = await ecs.describeTaskDefinition({ 
+      taskDefinition: taskDefinitionName 
+    });
+
+    const updatedContainerDefinitions = currentTaskDefinition.taskDefinition.containerDefinitions.map(container => {
+      // Find if this container has specific secrets to update
+      const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
+        (!container.name && secretPaths[0]); // Fallback to first container if no name specified
+
+      if (containerConfig) {
+        const containerSecrets = Object.keys(secretData)
+          .map(key => ({
+            name: key,
+            valueFrom: `${secretArn}:${key}::`
+          }));
+
+        return {
+          ...container,
+          secrets: containerSecrets.length ? containerSecrets : container.secrets
+        };
+      }
+      return container;
+    });
+
+    await ecs.registerTaskDefinition({
+      family: currentTaskDefinition.taskDefinition.family,
+      containerDefinitions: updatedContainerDefinitions,
+      ...currentTaskDefinition.taskDefinition
+    });
+    console.log('Task definition updated successfully');
+  } catch (err) {
+    throw new Error(`Failed to update ECS task definition: ${err.message}`);
+  }
 }
 
 // Start periodic checking
-const intervalInSeconds = process.env.CHECK_INTERVAL || 60; // Set default to 60 seconds if not defined
-startPeriodicCheck(intervalInSeconds);
+const intervalInSeconds = process.env.CHECK_INTERVAL || 60;
+setInterval(syncSecrets, intervalInSeconds * 1000);
+
+// Initial sync
+syncSecrets();
