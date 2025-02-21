@@ -127,6 +127,24 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       taskDefinition: taskDefinitionName 
     }));
 
+    // Get current secrets from task definition
+    const currentSecrets = taskDefinition.containerDefinitions.flatMap(container => 
+      container.secrets?.map(secret => secret.name) || []
+    );
+
+    // Get new secrets from secretData
+    const newSecrets = Object.keys(secretData);
+
+    // Check if there are any differences
+    const secretsChanged = 
+      newSecrets.length !== currentSecrets.length ||
+      newSecrets.some(secret => !currentSecrets.includes(secret));
+
+    if (!secretsChanged) {
+      console.log('No changes in secrets, skipping task definition update');
+      return;
+    }
+
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
       // Find if this container has specific secrets to update
       const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
