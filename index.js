@@ -1,8 +1,10 @@
 const vault = require('node-vault');
-const { ECS, SecretsManager } = require('@aws-sdk/client-ecs');
+const { SecretsManagerClient } = require('@aws-sdk/client-secrets-manager');
+const { ECSClient } = require('@aws-sdk/client-ecs');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
+const { DescribeSecretCommand, PutSecretValueCommand, CreateSecretCommand } = require('@aws-sdk/client-secrets-manager');
 
 // Initialize clients
 const vaultClient = vault({
@@ -11,8 +13,8 @@ const vaultClient = vault({
   token: process.env.VAULT_TOKEN,
 });
 
-const secretsManager = new SecretsManager({ region: process.env.AWS_REGION });
-const ecs = new ECS({ region: process.env.AWS_REGION });
+const secretsManager = new SecretsManagerClient({ region: process.env.AWS_REGION });
+const ecs = new ECSClient({ region: process.env.AWS_REGION });
 
 // File path to store the last known secret values
 const cacheFilePath = path.resolve(__dirname, '.last.cache.json');
@@ -86,19 +88,19 @@ async function pushSecretsToAWS(secretData) {
     // Check if secret exists
     let secretExists = true;
     try {
-      const secretDetails = await secretsManager.describeSecret({ SecretId: secretName });
-      await secretsManager.putSecretValue({
+      const secretDetails = await secretsManager.send(new DescribeSecretCommand({ SecretId: secretName }));
+      await secretsManager.send(new PutSecretValueCommand({
         SecretId: secretName,
         SecretString: secretString
-      });
+      }));
       console.log(`Updated secret ${secretName}`);
       return secretDetails.ARN;
     } catch (err) {
       if (err.name === 'ResourceNotFoundException') {
-        const response = await secretsManager.createSecret({
+        const response = await secretsManager.send(new CreateSecretCommand({
           Name: secretName,
           SecretString: secretString
-        });
+        }));
         console.log(`Created new secret ${secretName}`);
         return response.ARN;
       }
