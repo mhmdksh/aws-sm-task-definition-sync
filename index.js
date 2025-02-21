@@ -127,37 +127,55 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       taskDefinition: taskDefinitionName 
     }));
 
-    // Get current secrets from task definition, sorted for consistent comparison
-    const currentSecrets = new Set(
-      taskDefinition.containerDefinitions.flatMap(container => 
-        container.secrets?.map(secret => secret.name) || []
-      ).sort()
-    );
-
-    // Get new secrets from secretData, sorted for consistent comparison
-    const newSecrets = new Set(Object.keys(secretData).sort());
-
-    // Compare sets for exact equality (both content and size)
-    const secretsStructureChanged = 
-      currentSecrets.size !== newSecrets.size || 
-      ![...currentSecrets].every(secret => newSecrets.has(secret));
-
-    if (!secretsStructureChanged) {
-      console.log('No structural changes in secrets, skipping task definition update');
+    // Get the first container's secrets as they should all be the same
+    const container = taskDefinition.containerDefinitions[0];
+    if (!container || !container.secrets) {
+      console.log('No secrets found in current task definition');
       return;
     }
 
-    console.log('Detected changes in secret structure:');
-    console.log('Current secrets:', [...currentSecrets]);
-    console.log('New secrets:', [...newSecrets]);
+    // Create sets of secret names for comparison
+    const currentSecretNames = new Set(container.secrets.map(s => s.name));
+    const newSecretNames = new Set(Object.keys(secretData));
 
-    // Only update task definition if secret structure has changed
+    // Convert sets to arrays for logging
+    const currentSecretsArray = [...currentSecretNames].sort();
+    const newSecretsArray = [...newSecretNames].sort();
+
+    // Check if the sets are exactly equal
+    const secretsMatch = 
+      currentSecretNames.size === newSecretNames.size &&
+      currentSecretsArray.every((secret, index) => secret === newSecretsArray[index]);
+
+    if (secretsMatch) {
+      console.log('Secret structure is identical, skipping task definition update');
+      return;
+    }
+
+    // Log the differences for debugging
+    const addedSecrets = newSecretsArray.filter(s => !currentSecretNames.has(s));
+    const removedSecrets = currentSecretsArray.filter(s => !newSecretNames.has(s));
+
+    if (addedSecrets.length > 0) {
+      console.log('New secrets added:', addedSecrets);
+    }
+    if (removedSecrets.length > 0) {
+      console.log('Secrets removed:', removedSecrets);
+    }
+
+    // Only proceed with update if there are actual changes
+    if (addedSecrets.length === 0 && removedSecrets.length === 0) {
+      console.log('No structural changes detected despite different ordering');
+      return;
+    }
+
+    // Update task definition with new secret structure
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
       const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
         (!container.name && secretPaths[0]);
 
       if (containerConfig) {
-        const containerSecrets = [...newSecrets].map(key => ({
+        const containerSecrets = [...newSecretNames].sort().map(key => ({
           name: key,
           valueFrom: `${secretArn}:${key}::`
         }));
@@ -175,7 +193,7 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       containerDefinitions: updatedContainerDefinitions,
       ...taskDefinition
     }));
-    console.log('Secret structure changed, task definition updated successfully');
+    console.log('Task definition updated with secret structure changes');
   } catch (err) {
     throw new Error(`Failed to update ECS task definition: ${err.message}`);
   }
