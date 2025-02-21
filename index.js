@@ -134,50 +134,42 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       return;
     }
 
-    // Create sets of secret names for comparison
-    const currentSecretNames = new Set(container.secrets.map(s => s.name));
-    const newSecretNames = new Set(Object.keys(secretData));
+    // Store current secrets in a Map for easy comparison
+    const currentSecrets = new Map(
+      container.secrets.map(s => [s.name, s.valueFrom])
+    );
+    const newSecrets = new Set(Object.keys(secretData));
 
-    // Convert sets to arrays for logging
-    const currentSecretsArray = [...currentSecretNames].sort();
-    const newSecretsArray = [...newSecretNames].sort();
+    // Compare the secret names only
+    const currentSecretNames = new Set(currentSecrets.keys());
+    
+    // Check for actual structural changes
+    const addedSecrets = [...newSecrets].filter(s => !currentSecretNames.has(s));
+    const removedSecrets = [...currentSecretNames].filter(s => !newSecrets.has(s));
 
-    // Check if the sets are exactly equal
-    const secretsMatch = 
-      currentSecretNames.size === newSecretNames.size &&
-      currentSecretsArray.every((secret, index) => secret === newSecretsArray[index]);
+    // Log current state for debugging
+    console.log('Current secrets in task definition:', [...currentSecretNames]);
+    console.log('New secrets from Vault:', [...newSecrets]);
 
-    if (secretsMatch) {
-      console.log('Secret structure is identical, skipping task definition update');
-      return;
-    }
-
-    // Log the differences for debugging
-    const addedSecrets = newSecretsArray.filter(s => !currentSecretNames.has(s));
-    const removedSecrets = currentSecretsArray.filter(s => !newSecretNames.has(s));
-
-    if (addedSecrets.length > 0) {
-      console.log('New secrets added:', addedSecrets);
-    }
-    if (removedSecrets.length > 0) {
-      console.log('Secrets removed:', removedSecrets);
-    }
-
-    // Only proceed with update if there are actual changes
     if (addedSecrets.length === 0 && removedSecrets.length === 0) {
-      console.log('No structural changes detected despite different ordering');
+      console.log('No structural changes in secrets, skipping task definition update');
       return;
     }
 
-    // Update task definition with new secret structure
+    console.log('Changes detected:');
+    if (addedSecrets.length > 0) console.log('New secrets added:', addedSecrets);
+    if (removedSecrets.length > 0) console.log('Secrets removed:', removedSecrets);
+
+    // Update task definition only if there are structural changes
     const updatedContainerDefinitions = taskDefinition.containerDefinitions.map(container => {
       const containerConfig = secretPaths.find(sp => sp.container === container.name) || 
         (!container.name && secretPaths[0]);
 
       if (containerConfig) {
-        const containerSecrets = [...newSecretNames].sort().map(key => ({
+        // Create the new secrets array maintaining the existing valueFrom for unchanged secrets
+        const containerSecrets = [...newSecrets].map(key => ({
           name: key,
-          valueFrom: `${secretArn}:${key}::`
+          valueFrom: currentSecrets.get(key) || `${secretArn}:${key}::`
         }));
 
         return {
@@ -188,6 +180,7 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
       return container;
     });
 
+    // Only update if we actually found changes
     await ecs.send(new RegisterTaskDefinitionCommand({
       family: taskDefinition.family,
       containerDefinitions: updatedContainerDefinitions,
