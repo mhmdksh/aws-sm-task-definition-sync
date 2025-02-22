@@ -22,7 +22,7 @@ jspm_packages/
 .node_repl_history
 
 # dotenv environment variables file
-*.env
+*.env*
 
 # TypeScript cache
 *.tsbuildinfo
