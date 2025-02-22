@@ -4,7 +4,7 @@ const { ECSClient } = require('@aws-sdk/client-ecs');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
-const { DescribeSecretCommand, PutSecretValueCommand, CreateSecretCommand } = require('@aws-sdk/client-secrets-manager');
+const { DescribeSecretCommand, PutSecretValueCommand, CreateSecretCommand, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 const { DescribeTaskDefinitionCommand, RegisterTaskDefinitionCommand } = require('@aws-sdk/client-ecs');
 
 // Initialize clients
@@ -86,18 +86,40 @@ async function pushSecretsToAWS(secretData) {
   const secretString = JSON.stringify(secretData);
 
   try {
-    // Check if secret exists
-    let secretExists = true;
+    // First, get the current secret value
+    let currentSecretValue;
     try {
-      const secretDetails = await secretsManager.send(new DescribeSecretCommand({ SecretId: secretName }));
-      await secretsManager.send(new PutSecretValueCommand({
-        SecretId: secretName,
-        SecretString: secretString
+      const response = await secretsManager.send(new GetSecretValueCommand({
+        SecretId: secretName
       }));
-      console.log(`Updated secret ${secretName}`);
+      currentSecretValue = response.SecretString;
+    } catch (err) {
+      if (err.name !== 'ResourceNotFoundException') {
+        throw err;
+      }
+    }
+
+    // Check if secret exists
+    try {
+      const secretDetails = await secretsManager.send(new DescribeSecretCommand({ 
+        SecretId: secretName 
+      }));
+
+      // Only update if the values have changed
+      if (currentSecretValue !== secretString) {
+        await secretsManager.send(new PutSecretValueCommand({
+          SecretId: secretName,
+          SecretString: secretString
+        }));
+        console.log(`Updated secret ${secretName} with new values`);
+      } else {
+        console.log(`No changes in secret values for ${secretName}, skipping update`);
+      }
+      
       return secretDetails.ARN;
     } catch (err) {
       if (err.name === 'ResourceNotFoundException') {
+        // Create new secret if it doesn't exist
         const response = await secretsManager.send(new CreateSecretCommand({
           Name: secretName,
           SecretString: secretString
