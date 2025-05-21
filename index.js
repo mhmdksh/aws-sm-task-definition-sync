@@ -56,8 +56,6 @@ async function syncSecrets() {
       // Update the cache with new secrets
       fs.writeFileSync(cacheFilePath, JSON.stringify(secrets, null, 2));
       console.log('Sync completed successfully');
-    } else {
-      console.log('No changes detected in Vault secrets, skipping AWS sync');
     }
   } catch (err) {
     console.error('Sync failed:', err.message);
