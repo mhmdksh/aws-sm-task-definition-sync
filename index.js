@@ -20,19 +20,45 @@ const ecs = new ECSClient({ region: process.env.AWS_REGION });
 // File path to store the last known secret values
 const cacheFilePath = path.resolve(__dirname, '.last.cache.json');
 
+// Function to compare current secrets with last known state
+function haveSecretsChanged(currentSecrets, lastKnownSecrets) {
+  if (!lastKnownSecrets) return true;
+  
+  const currentKeys = Object.keys(currentSecrets).sort();
+  const lastKnownKeys = Object.keys(lastKnownSecrets).sort();
+  
+  if (currentKeys.length !== lastKnownKeys.length) return true;
+  
+  return currentKeys.some(key => currentSecrets[key] !== lastKnownSecrets[key]);
+}
+
 // Main function to handle the complete sync process
 async function syncSecrets() {
   try {
     // Step 1: Read secrets from Vault
     const { secrets, secretPaths } = await readVaultSecrets();
     
-    // Step 2: Push secrets to AWS Secrets Manager
-    const secretArn = await pushSecretsToAWS(secrets);
+    // Read last known state
+    let lastKnownSecrets = null;
+    if (fs.existsSync(cacheFilePath)) {
+      lastKnownSecrets = JSON.parse(fs.readFileSync(cacheFilePath, 'utf-8'));
+    }
     
-    // Step 3: Update ECS Task Definition
-    await updateEcsTaskDefinition(secretArn, secrets, secretPaths);
-    
-    console.log('Sync completed successfully');
+    // Only proceed with AWS sync if secrets have changed
+    if (haveSecretsChanged(secrets, lastKnownSecrets)) {
+      console.log('Changes detected in Vault secrets, proceeding with AWS sync...');
+      // Step 2: Push secrets to AWS Secrets Manager
+      const secretArn = await pushSecretsToAWS(secrets);
+      
+      // Step 3: Update ECS Task Definition
+      await updateEcsTaskDefinition(secretArn, secrets, secretPaths);
+      
+      // Update the cache with new secrets
+      fs.writeFileSync(cacheFilePath, JSON.stringify(secrets, null, 2));
+      console.log('Sync completed successfully');
+    } else {
+      console.log('No changes detected in Vault secrets, skipping AWS sync');
+    }
   } catch (err) {
     console.error('Sync failed:', err.message);
     handleSyncFailure();
@@ -53,7 +79,7 @@ function getSecretPaths() {
   return paths.length ? paths : [{ path: process.env.VAULT_SECRET_PATH, container: process.env.CONTAINER_NAME || null }];
 }
 
-// Modified readVaultSecrets to handle multiple secret paths without prefixing
+// Modified readVaultSecrets to not write to cache file (we'll do this in syncSecrets)
 async function readVaultSecrets() {
   const kvStore = process.env.VAULT_KV_STORE;
   const secretPaths = getSecretPaths();
@@ -66,7 +92,6 @@ async function readVaultSecrets() {
       Object.assign(allSecrets, secret.data.data);
     }
     
-    fs.writeFileSync(cacheFilePath, JSON.stringify(allSecrets, null, 2));
     return { secrets: allSecrets, secretPaths };
   } catch (err) {
     if (err.message.includes('permission denied') || err.message.includes('invalid token')) {
