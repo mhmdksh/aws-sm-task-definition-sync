@@ -25,6 +25,7 @@ const CACHE_MAX_AGE = parseInt(process.env.CACHE_MAX_AGE_MINUTES || '10') * 60 *
 const FORCE_REFRESH_INTERVAL = parseInt(process.env.FORCE_REFRESH_INTERVAL_MINUTES || '60') * 60 * 1000; // Default 1 hour
 const STARTUP_CACHE_CLEAR = process.env.STARTUP_CACHE_CLEAR === 'true';
 const DISABLE_CACHE_FALLBACK = process.env.DISABLE_CACHE_FALLBACK === 'true';
+const QUIET_MODE = process.env.QUIET_MODE !== 'false'; // Default to true (quiet)
 
 let lastForceRefresh = 0;
 
@@ -58,10 +59,10 @@ function readCacheData() {
     const data = JSON.parse(fs.readFileSync(cacheFilePath, 'utf-8'));
     // Support both old format (direct secrets) and new format (with metadata)
     if (data.timestamp && data.secrets) {
-      console.log(`Using cache from ${new Date(data.timestamp).toISOString()}`);
+      if (!QUIET_MODE) console.log(`Using cache from ${new Date(data.timestamp).toISOString()}`);
       return data.secrets;
     } else {
-      console.log('Using legacy cache format');
+      if (!QUIET_MODE) console.log('Using legacy cache format');
       return data;
     }
   } catch (error) {
@@ -121,7 +122,7 @@ async function syncSecrets() {
       saveCacheWithMetadata(secrets);
       console.log('Sync completed successfully');
     } else {
-      console.log('No changes detected, skipping sync');
+      if (!QUIET_MODE) console.log('No changes detected, skipping sync');
     }
   } catch (err) {
     console.error('Sync failed:', err.message);
@@ -212,7 +213,7 @@ async function pushSecretsToAWS(secretData) {
         }));
         console.log(`Updated secret ${secretName} with new values`);
       } else {
-        console.log(`No changes in secret values for ${secretName}, skipping update`);
+        if (!QUIET_MODE) console.log(`No changes in secret values for ${secretName}, skipping update`);
       }
       
       return secretDetails.ARN;
@@ -278,7 +279,7 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
     });
 
     if (!hasStructuralChanges) {
-      console.log('No changes in secret structure for any container, skipping task definition update');
+      if (!QUIET_MODE) console.log('No changes in secret structure for any container, skipping task definition update');
       return;
     }
 
