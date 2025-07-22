@@ -20,6 +20,56 @@ const ecs = new ECSClient({ region: process.env.AWS_REGION });
 // File path to store the last known secret values
 const cacheFilePath = path.resolve(__dirname, '.last.cache.json');
 
+// Cache configuration
+const CACHE_MAX_AGE = parseInt(process.env.CACHE_MAX_AGE_MINUTES || '10') * 60 * 1000; // Default 10 minutes
+const FORCE_REFRESH_INTERVAL = parseInt(process.env.FORCE_REFRESH_INTERVAL_MINUTES || '60') * 60 * 1000; // Default 1 hour
+const STARTUP_CACHE_CLEAR = process.env.STARTUP_CACHE_CLEAR === 'true';
+const DISABLE_CACHE_FALLBACK = process.env.DISABLE_CACHE_FALLBACK === 'true';
+
+let lastForceRefresh = 0;
+
+// Function to check if cache is expired
+function isCacheExpired(cacheFilePath) {
+  if (!fs.existsSync(cacheFilePath)) return true;
+  const stats = fs.statSync(cacheFilePath);
+  return (Date.now() - stats.mtime.getTime()) > CACHE_MAX_AGE;
+}
+
+// Function to check if force refresh is needed
+function isForceRefreshNeeded() {
+  return (Date.now() - lastForceRefresh) > FORCE_REFRESH_INTERVAL;
+}
+
+// Function to save cache with metadata
+function saveCacheWithMetadata(secrets) {
+  const cacheData = {
+    timestamp: Date.now(),
+    secrets: secrets
+  };
+  fs.writeFileSync(cacheFilePath, JSON.stringify(cacheData, null, 2));
+  console.log(`Cache updated at ${new Date().toISOString()}`);
+}
+
+// Function to read cache with validation
+function readCacheData() {
+  if (!fs.existsSync(cacheFilePath)) return null;
+  
+  try {
+    const data = JSON.parse(fs.readFileSync(cacheFilePath, 'utf-8'));
+    // Support both old format (direct secrets) and new format (with metadata)
+    if (data.timestamp && data.secrets) {
+      console.log(`Using cache from ${new Date(data.timestamp).toISOString()}`);
+      return data.secrets;
+    } else {
+      console.log('Using legacy cache format');
+      return data;
+    }
+  } catch (error) {
+    console.error('Error reading cache file:', error.message);
+    return null;
+  }
+}
+
 // Function to compare current secrets with last known state
 function haveSecretsChanged(currentSecrets, lastKnownSecrets) {
   if (!lastKnownSecrets) return true;
@@ -35,27 +85,43 @@ function haveSecretsChanged(currentSecrets, lastKnownSecrets) {
 // Main function to handle the complete sync process
 async function syncSecrets() {
   try {
+    // Check if cache should be cleared on startup
+    if (STARTUP_CACHE_CLEAR && fs.existsSync(cacheFilePath)) {
+      fs.unlinkSync(cacheFilePath);
+      console.log('Startup cache cleared');
+    }
+
+    // Check if force refresh is needed
+    const forceRefresh = isForceRefreshNeeded() || isCacheExpired(cacheFilePath);
+    
     // Step 1: Read secrets from Vault
     const { secrets, secretPaths } = await readVaultSecrets();
     
-    // Read last known state
-    let lastKnownSecrets = null;
-    if (fs.existsSync(cacheFilePath)) {
-      lastKnownSecrets = JSON.parse(fs.readFileSync(cacheFilePath, 'utf-8'));
-    }
+    // Read last known state with validation
+    let lastKnownSecrets = readCacheData();
     
-    // Only proceed with AWS sync if secrets have changed
-    if (haveSecretsChanged(secrets, lastKnownSecrets)) {
-      console.log('Changes detected in Vault secrets, proceeding with AWS sync...');
+    // Determine if sync is needed
+    const needsSync = forceRefresh || haveSecretsChanged(secrets, lastKnownSecrets);
+    
+    if (needsSync) {
+      if (forceRefresh) {
+        console.log('Force refresh triggered, proceeding with AWS sync...');
+        lastForceRefresh = Date.now();
+      } else {
+        console.log('Changes detected in Vault secrets, proceeding with AWS sync...');
+      }
+      
       // Step 2: Push secrets to AWS Secrets Manager
       const secretArn = await pushSecretsToAWS(secrets);
       
       // Step 3: Update ECS Task Definition
       await updateEcsTaskDefinition(secretArn, secrets, secretPaths);
       
-      // Update the cache with new secrets
-      fs.writeFileSync(cacheFilePath, JSON.stringify(secrets, null, 2));
+      // Update the cache with new secrets and metadata
+      saveCacheWithMetadata(secrets);
       console.log('Sync completed successfully');
+    } else {
+      console.log('No changes detected, skipping sync');
     }
   } catch (err) {
     console.error('Sync failed:', err.message);
@@ -93,11 +159,21 @@ async function readVaultSecrets() {
     return { secrets: allSecrets, secretPaths };
   } catch (err) {
     if (err.message.includes('permission denied') || err.message.includes('invalid token')) {
-      console.error('Vault authentication failed, using cached secrets');
-      if (fs.existsSync(cacheFilePath)) {
-        return { secrets: JSON.parse(fs.readFileSync(cacheFilePath, 'utf-8')), secretPaths };
+      console.error('Vault authentication failed');
+      
+      if (DISABLE_CACHE_FALLBACK) {
+        throw new Error('Vault authentication failed and cache fallback is disabled');
       }
-      throw new Error('No cached secrets available');
+      
+      console.log('Attempting to use cached secrets...');
+      const cachedSecrets = readCacheData();
+      
+      if (cachedSecrets) {
+        console.log('Using cached secrets due to vault authentication failure');
+        return { secrets: cachedSecrets, secretPaths };
+      }
+      
+      throw new Error('No cached secrets available and vault authentication failed');
     }
     throw err;
   }
