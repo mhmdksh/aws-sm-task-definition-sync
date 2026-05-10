@@ -24,21 +24,32 @@ function getClient() {
   return client;
 }
 
-function buildPath(kvStore, secretPath) {
+function buildPath(kvStore, secretPath, kvVersion) {
+  if (kvVersion === 1) {
+    return `${kvStore}/${secretPath}`;
+  }
   return `${kvStore}/data/${secretPath}`;
 }
 
-async function readSecret(kvStore, secretPath) {
-  const fullPath = buildPath(kvStore, secretPath);
-  logger.debug(COMPONENT, 'Reading Vault secret', { path: fullPath });
+function extractSecretData(response, kvVersion) {
+  if (kvVersion === 1) {
+    return response.data;
+  }
+  return response.data.data;
+}
+
+async function readSecret(kvStore, secretPath, kvVersion) {
+  const fullPath = buildPath(kvStore, secretPath, kvVersion);
+  logger.debug(COMPONENT, 'Reading Vault secret', { path: fullPath, kvVersion });
 
   try {
-    const secret = await getClient().read(fullPath);
+    const response = await getClient().read(fullPath);
+    const secretData = extractSecretData(response, kvVersion);
     logger.info(COMPONENT, 'Secret read successfully', {
       path: fullPath,
-      keys: Object.keys(secret.data.data),
+      keys: Object.keys(secretData),
     });
-    return secret.data.data;
+    return secretData;
   } catch (err) {
     logger.error(COMPONENT, `Failed to read Vault secret at path: ${fullPath}`, err);
     throw err;
@@ -46,17 +57,18 @@ async function readSecret(kvStore, secretPath) {
 }
 
 async function readAllSecrets(config) {
-  const { kvStore } = config.vault;
+  const { kvStore, kvVersion } = config.vault;
   const { secretPaths } = config;
   const allSecrets = {};
 
   logger.info(COMPONENT, 'Reading all configured Vault secrets', {
     kvStore,
+    kvVersion,
     pathCount: secretPaths.length,
   });
 
   for (const { path: secretPath } of secretPaths) {
-    const secrets = await readSecret(kvStore, secretPath);
+    const secrets = await readSecret(kvStore, secretPath, kvVersion);
     Object.assign(allSecrets, secrets);
   }
 

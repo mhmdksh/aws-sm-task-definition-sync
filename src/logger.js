@@ -57,6 +57,10 @@ function formatError(err) {
   if (err.response) {
     details.statusCode = details.statusCode || err.response.statusCode;
     details.body = err.response.body;
+    // Vault API errors are often in body.errors[]
+    if (err.response.body && err.response.body.errors) {
+      details.vaultErrors = err.response.body.errors;
+    }
   }
 
   // HTTP-style errors
@@ -115,6 +119,12 @@ const logger = {
       }
       if (details.region) {
         console.error(`  Region: ${details.region}`);
+      }
+      if (details.body) {
+        console.error(`  Response Body: ${JSON.stringify(details.body)}`);
+      }
+      if (details.vaultErrors && details.vaultErrors.length > 0) {
+        details.vaultErrors.forEach((ve) => console.error(`  Vault Error: ${ve}`));
       }
 
       // Print stack trace in debug mode

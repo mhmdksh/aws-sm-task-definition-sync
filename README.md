@@ -26,7 +26,8 @@ Copy `.env.template` to `.env` and fill in:
 |---|---|---|
 | `VAULT_ENDPOINT` | Yes | Vault server URL |
 | `VAULT_TOKEN` | Yes | Vault auth token |
-| `VAULT_KV_STORE` | Yes | KV v2 store name (e.g. `secret`) |
+| `VAULT_KV_STORE` | Yes | KV store name (e.g. `secret`) |
+| `VAULT_KV_VERSION` | No | `1` for KV v1, `2` for KV v2 (default: 2) |
 | `VAULT_SECRET_PATH_1` | Yes | First Vault secret path |
 | `AWS_REGION` | Yes | AWS region |
 | `AWS_SECRET_NAME` | Yes | AWS Secrets Manager secret name |

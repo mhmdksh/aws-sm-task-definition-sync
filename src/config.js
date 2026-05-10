@@ -77,6 +77,7 @@ function loadConfig() {
       endpoint: process.env.VAULT_ENDPOINT,
       token: process.env.VAULT_TOKEN,
       kvStore: process.env.VAULT_KV_STORE,
+      kvVersion: parseInt(process.env.VAULT_KV_VERSION || '2', 10),
     },
 
     // AWS
@@ -112,6 +113,7 @@ function loadConfig() {
 
   logger.info(COMPONENT, 'Configuration loaded', {
     vaultEndpoint: config.vault.endpoint ? '(set)' : '(not set)',
+    kvVersion: config.vault.kvVersion,
     awsRegion: config.aws.region,
     secretName: config.aws.secretName,
     ecsTaskDefinition: config.aws.ecsTaskDefinition,

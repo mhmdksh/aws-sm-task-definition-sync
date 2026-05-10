@@ -79,7 +79,11 @@ async function updateEcsTaskDefinition(secretArn, secretData, secretPaths) {
   for (const { path: secretPath, container } of secretPaths) {
     if (!container) continue;
 
-    const vaultPathSecrets = await vault.readSecret(config.vault.kvStore, secretPath);
+    const vaultPathSecrets = await vault.readSecret(
+      config.vault.kvStore,
+      secretPath,
+      config.vault.kvVersion
+    );
     containerSecretMap.set(container, Object.keys(vaultPathSecrets));
   }
 
