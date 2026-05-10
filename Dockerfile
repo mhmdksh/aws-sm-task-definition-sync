@@ -1,17 +1,22 @@
-# Use the official Node.js image
-FROM node:20-alpine
+FROM node:22-alpine
 
-# Create and set the working directory
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -u 1001 -S appuser -G appgroup
+
 WORKDIR /usr/src/app
 
-# Copy package.json and package-lock.json
-COPY package*.json ./
+COPY package.json package-lock.json ./
 
-# Install dependencies
-RUN npm install
+RUN npm ci --omit=dev && \
+    npm cache clean --force
 
-# Copy the rest of the application code
-COPY . .
+COPY src/ ./src/
 
-# Start the monitoring script in the background and then run the Node.js application
-CMD ["/bin/sh", "-c", "node index.js"]
+RUN chown -R appuser:appgroup /usr/src/app
+
+USER appuser
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD pgrep -f "node src/index.js" || exit 1
+
+CMD ["node", "src/index.js"]
