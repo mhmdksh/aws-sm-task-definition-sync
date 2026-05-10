@@ -1,7 +1,15 @@
 services:
   secret-syncer:
-    container_name: secret-syncer
-    build: .
+    container_name: ${DOCKER_CONTAINER_NAME:-secret-syncer}
+    build:
+      context: .
+      dockerfile: Dockerfile
     env_file:
       - .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "node src/index.js"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
